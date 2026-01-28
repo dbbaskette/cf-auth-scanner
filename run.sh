@@ -16,10 +16,9 @@ fi
 source "$VENV_DIR/bin/activate"
 
 # Install dependencies if requirements.txt has changed or first run
-# (Simple check: just run pip install, it's fast if already satisfied)
 if [ -f "requirements.txt" ]; then
-    pip install -q -r requirements.txt
+    "$VENV_DIR/bin/pip" install -q -r requirements.txt
 fi
 
 # Run the scanner, passing all arguments from this script to the python script
-python3 cf-auth-scanner.py "$@"
+"$VENV_DIR/bin/python3" cf-auth-scanner.py "$@"
