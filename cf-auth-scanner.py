@@ -40,6 +40,11 @@ REDIRECT_CODES = [301, 302, 303, 307, 308]
 STATUS_PRIORITY = {"CRITICAL": 0, "HIGH": 1, "WARNING": 2, "SECURE": 3, "SKIPPED": 4, "UNREACHABLE": 5, "ERROR": 6}
 
 
+def ensure_https(url: str) -> str:
+    """Ensure URL has https:// prefix."""
+    return url if url.startswith("http") else f"https://{url}"
+
+
 class CFClient:
     """Client for interacting with Cloud Foundry V3 API."""
     
@@ -208,7 +213,7 @@ class Scanner:
 
     def _probe_endpoint(self, route: str, result: Dict) -> None:
         """Probe the endpoint and update result with security status."""
-        url = route if route.startswith("http") else f"https://{route}"
+        url = ensure_https(route)
 
         try:
             resp = requests.get(url, timeout=self.timeout, verify=False, allow_redirects=False)
@@ -244,12 +249,11 @@ class Scanner:
         content_lower = content.lower()
         
         # Check for login/auth page indicators
-        login_indicators_found = [ind for ind in LOGIN_PAGE_INDICATORS if ind in content_lower]
-        has_login_page = bool(login_indicators_found)
+        login_indicator = next((ind for ind in LOGIN_PAGE_INDICATORS if ind in content_lower), None)
 
-        if has_login_page:
+        if login_indicator:
             result["status"] = "SECURE"
-            self._append_detail(result, f"Login page detected ({login_indicators_found[0]})")
+            self._append_detail(result, f"Login page detected ({login_indicator})")
         elif result["auth_detected"]:
             result["status"] = "HIGH"
             self._append_detail(result, "Auth service bound but root returns 200 OK")
@@ -453,15 +457,6 @@ def scan_apps(scanner: Scanner, apps: List[Dict], service_map: Dict, max_threads
     return results
 
 
-def enrich_results(results: List[Dict], space_map: Dict, target_orgs: List[Dict]) -> None:
-    """Add org/space names to results."""
-    for result in results:
-        space_guid = result.get("guid")
-        # Find app's space from the original app data - need to look up differently
-        # Actually results don't have the space relationship, need to fix this
-        pass
-
-
 def print_results(results: List[Dict]) -> None:
     """Print results table with clickable app names."""
     results.sort(key=lambda x: STATUS_PRIORITY.get(x["status"], 99))
@@ -486,8 +481,7 @@ def print_results(results: List[Dict]) -> None:
         # Make app name a clickable link if it has routes
         routes = r.get("routes", [])
         if routes:
-            url = routes[0] if routes[0].startswith("http") else f"https://{routes[0]}"
-            app_display = f"[link={url}]{r['name']}[/link]"
+            app_display = f"[link={ensure_https(routes[0])}]{r['name']}[/link]"
         else:
             app_display = r["name"]
         
