@@ -19,8 +19,23 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 console = Console()
 
 # --- CONSTANTS ---
-AUTH_KEYWORDS_DEFAULT = ["uaa", "sso", "auth", "idp", "oauth"]
-LOGIN_KEYWORDS = ["login", "auth", "oauth", "sso", "saml"]
+AUTH_KEYWORDS_DEFAULT = ["uaa", "sso", "auth", "idp", "oauth", "oidc"]
+LOGIN_KEYWORDS = ["login", "auth", "oauth", "sso", "saml", "oidc", "openid", "authorize", "signin", "sign-in"]
+LOGIN_PAGE_INDICATORS = [
+    '<input type="password"',
+    'type="password"',
+    "password",
+    "sign in",
+    "log in", 
+    "login",
+    "authenticate",
+    "oidc",
+    "openid",
+    "oauth",
+    "identity provider",
+    "idp",
+    "authorization",
+]
 REDIRECT_CODES = [301, 302, 303, 307, 308]
 STATUS_PRIORITY = {"CRITICAL": 0, "HIGH": 1, "WARNING": 2, "SECURE": 3, "SKIPPED": 4, "UNREACHABLE": 5, "ERROR": 6}
 
@@ -227,11 +242,14 @@ class Scanner:
     def _classify_200_response(self, content: str, result: Dict) -> None:
         """Classify a 200 OK response."""
         content_lower = content.lower()
-        has_login_form = '<input type="password"' in content_lower or "password" in content_lower
+        
+        # Check for login/auth page indicators
+        login_indicators_found = [ind for ind in LOGIN_PAGE_INDICATORS if ind in content_lower]
+        has_login_page = bool(login_indicators_found)
 
-        if has_login_form:
-            result["status"] = "WARNING"
-            self._append_detail(result, "Login form detected (Manual check required)")
+        if has_login_page:
+            result["status"] = "SECURE"
+            self._append_detail(result, f"Login page detected ({login_indicators_found[0]})")
         elif result["auth_detected"]:
             result["status"] = "HIGH"
             self._append_detail(result, "Auth service bound but root returns 200 OK")
@@ -370,33 +388,48 @@ def select_scope_interactive(client: CFClient) -> tuple:
     return selected_orgs, selected_spaces
 
 
-def fetch_resources(client: CFClient, target_spaces: List[Dict], progress) -> tuple:
-    """Fetch apps and service instances for all target spaces."""
+def fetch_space_resources(client: CFClient, space: Dict) -> tuple:
+    """Fetch apps and service instances for a single space. Returns (apps, services)."""
+    space_guid = space["guid"]
+    apps = []
+    services = []
+
+    try:
+        services = client.get("/v3/service_instances", params={"space_guids": space_guid}, fail_on_error=False)
+    except Exception:
+        pass
+
+    try:
+        apps = client.get("/v3/apps", params={"space_guids": space_guid, "per_page": 50}, fail_on_error=False)
+    except Exception:
+        pass
+
+    return apps, services
+
+
+def fetch_resources(client: CFClient, target_spaces: List[Dict], max_threads: int, progress) -> tuple:
+    """Fetch apps and service instances for all target spaces in parallel."""
     all_apps = []
     service_map = {}
 
     task = progress.add_task("Fetching resources...", total=len(target_spaces))
 
-    for space in target_spaces:
-        space_guid = space["guid"]
-        progress.update(task, description=f"Fetching: {space['name']}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {executor.submit(fetch_space_resources, client, space): space for space in target_spaces}
 
-        # Service instances
-        try:
-            services = client.get("/v3/service_instances", params={"space_guids": space_guid}, fail_on_error=False)
-            for svc in services:
-                service_map[svc["guid"]] = {"name": svc["name"], "type": svc["type"], "offering_name": ""}
-        except Exception:
-            pass
+        for future in concurrent.futures.as_completed(futures):
+            space = futures[future]
+            progress.update(task, description=f"Fetched: {space['name']}")
+            
+            try:
+                apps, services = future.result()
+                all_apps.extend(apps)
+                for svc in services:
+                    service_map[svc["guid"]] = {"name": svc["name"], "type": svc["type"], "offering_name": ""}
+            except Exception:
+                pass
 
-        # Apps
-        try:
-            apps = client.get("/v3/apps", params={"space_guids": space_guid, "per_page": 50}, fail_on_error=False)
-            all_apps.extend(apps)
-        except Exception:
-            pass
-
-        progress.update(task, advance=1)
+            progress.update(task, advance=1)
 
     return all_apps, service_map
 
@@ -430,7 +463,7 @@ def enrich_results(results: List[Dict], space_map: Dict, target_orgs: List[Dict]
 
 
 def print_results(results: List[Dict]) -> None:
-    """Print results table."""
+    """Print results table with clickable app names."""
     results.sort(key=lambda x: STATUS_PRIORITY.get(x["status"], 99))
 
     table = Table(title="Scan Results", box=box.ROUNDED)
@@ -449,10 +482,19 @@ def print_results(results: List[Dict]) -> None:
 
     for r in results:
         style = status_styles.get(r["status"], "green")
+        
+        # Make app name a clickable link if it has routes
+        routes = r.get("routes", [])
+        if routes:
+            url = routes[0] if routes[0].startswith("http") else f"https://{routes[0]}"
+            app_display = f"[link={url}]{r['name']}[/link]"
+        else:
+            app_display = r["name"]
+        
         table.add_row(
             r["org_name"],
             r["space_name"],
-            r["name"],
+            app_display,
             f"[{style}]{r['status']}[/{style}]",
             r["details"]
         )
@@ -494,7 +536,7 @@ def main(scope, config_path, output):
         TaskProgressColumn(),
         console=console
     ) as progress:
-        all_apps, service_map = fetch_resources(client, target_spaces, progress)
+        all_apps, service_map = fetch_resources(client, target_spaces, max_threads, progress)
 
         if not all_apps:
             console.print("[yellow]No apps found in selected spaces.[/yellow]")
