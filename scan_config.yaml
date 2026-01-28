@@ -1,0 +1,30 @@
+# Cloud Foundry Auth Scanner Configuration
+
+# Targets can be specific Orgs and Spaces
+# Use "*" for all spaces in an org
+targets:
+  - org: "my-org-1"
+    spaces: ["dev", "staging"]
+  
+  - org: "my-org-2"
+    spaces: ["*"]
+
+# Authentication Service Keywords
+# Services containing these strings will be considered "Auth Providers"
+auth_service_keywords:
+  - "uaa"
+  - "sso"
+  - "auth"
+  - "idp"
+  - "keycloak"
+  - "ldap"
+  - "oauth"
+  - "security"
+  - "pingfederate"
+  - "okta"
+
+# Scanner Settings
+settings:
+  timeout_seconds: 5
+  max_threads: 10
+  user_agent: "CF-Auth-Scanner/1.0"
